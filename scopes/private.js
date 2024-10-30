@@ -3,11 +3,29 @@ const { Menu } = require('@grammyjs/menu');
 const { Keyboard } = require('grammy');
 const crypto = require('crypto');
 const { on } = require('events');
+const { create } = require('domain');
+
+// function for access control 
+// private chats only
+function privateChat(ctx) {
+    if (ctx.chat.type !== "private") {
+        return ctx.reply("This command is only available in private chats.");
+    }
+}
+
+// admins only
+function adminOnly(ctx) {
+    const owner = 1777752685;
+    if (ctx.from.id !== owner) {
+        return ctx.reply("You are not authorized to run this command.");
+    }
+}
 
 module.exports = (bot, commands, db, imports, State) => {
 
     // Example: Insert data into another collection
     const portals = db.collection("portals");
+    const adminData = db.collection("adminData");
 
     async function createPortal(portalName, chatId, channelId, customText, mediaType, mediaUrl, user) {
       const portalData = {
@@ -39,6 +57,39 @@ module.exports = (bot, commands, db, imports, State) => {
         // console.log("Portal updated:", portalData);
         return portalData;
     }
+
+    async function createAdminData() {
+        const data = {
+            _id: 1,
+            logo: null,
+        };
+        const res = await adminData.insertOne(data);
+        
+        return res;
+    }
+
+    async function updateAdminDataLogo(type, logo) {
+        const data = {
+            logoType: type,
+            logo: logo,
+        };
+        await adminData.updateOne({ _id: 1 }, { $set: data });
+        return data;
+    }
+
+    // check if adminData exists
+    async function setupAdminData() {
+        const adminDataExists = await adminData.findOne({ _id: 1 });
+        if (!adminDataExists) {
+            console.log("Admin data not found. Creating new data...");
+            const res = await createAdminData();
+            console.log("Admin data created:", res);
+        }
+    }
+
+    setupAdminData();
+
+
 
     async function activatePortal(ctx, channelId, id) {
         // Trigger the /activate-portal command in the channel
@@ -73,7 +124,13 @@ module.exports = (bot, commands, db, imports, State) => {
         let portalName;
 
         // Step 0: Enter Portal Name
-        await ctx.reply("Please enter the name of your portal (internal use only):");
+        await ctx.reply("Please enter the name of your portal (internal use only):", {
+            reply_markup: {
+                inline_keyboard: [
+                    [{ text: 'Cancel', callback_data: 'cancel' }]
+                ]
+            }
+        });
         const portalNameLoop = true;
         while (portalNameLoop) {
             const portalNameRes = await conversation.wait();
@@ -81,6 +138,9 @@ module.exports = (bot, commands, db, imports, State) => {
                 portalName = portalNameRes.message.text;
                 await ctx.reply(`Portal name set to: ${portalName}`);
                 break;
+            } else if (portalNameRes.callbackQuery && portalNameRes.callbackQuery.data === "cancel") {
+                await ctx.reply("Portal creation canceled.");
+                return;
             } else {
                 await ctx.reply("Invalid input. Please send text only.");
             }
@@ -401,6 +461,8 @@ module.exports = (bot, commands, db, imports, State) => {
     // Update portal
     commands.private.push({ command: "update", description: "Update your portal" });
     async function updatePortalCommand(conversation, ctx) {
+        privateChat(ctx);
+
         console.log("updatePortal");
         if(State.isBotBroken) {
             State.isBotBroken = false;
@@ -555,7 +617,7 @@ module.exports = (bot, commands, db, imports, State) => {
                 await ctx.reply(`Please send the updated media file (image/video/gif) for your portal:`, { parse_mode: "HTML",
                     reply_markup: {
                         inline_keyboard: [
-                            [{ text: 'Keep', callback_data: 'keep' }]
+                            [{ text: 'Keep', callback_data: 'keep' }],
                             [{ text: 'Remove', callback_data: 'remove' }]
                         ]
                     }
@@ -682,6 +744,7 @@ module.exports = (bot, commands, db, imports, State) => {
     // Delete portal
     commands.private.push({ command: "delete", description: "Delete your portal" });
     bot.command("delete", async (ctx) => {
+        privateChat(ctx);
         console.log("delete");
         await ctx.conversation.enter('deletePortal');
     });
@@ -734,10 +797,7 @@ module.exports = (bot, commands, db, imports, State) => {
         // return;
         // Extract the 'start' payload safely
         const startPayload = ctx.message.text.split(' ')[1];
-        if (!startPayload || !startPayload.startsWith('verify_')) {
-            await ctx.reply("Welcome! Type /setup to begin setting up your portal.");
-            return;
-        }
+        
         
         const encodedData = startPayload.replace('verify_', '');
         const chatId = encodedData;
@@ -817,12 +877,60 @@ module.exports = (bot, commands, db, imports, State) => {
       // Start button to trigger CAPTCHA
     bot.command("start", async (ctx) => {
         console.log("verify");
-        await ctx.conversation.enter('captchaConversation');
+
+        if(ctx.message) {
+                const startPayload = ctx.message.text.split(' ')[1];
+            if (startPayload && startPayload.startsWith('verify_')) {
+                await ctx.conversation.enter('captchaConversation');
+                return;
+            }
+        }
+        
+
+        const text = "Welcome! Type /setup or click setup below to begin setting up your portal.";
+        const options = {
+            caption: text,
+            reply_markup: {
+                inline_keyboard: [
+                    [{ text: 'Setup', callback_data: 'setup' }]
+                ]
+            }
+        };
+
+        const adminDataExists = await adminData.findOne({ _id: 1 });
+        if (adminDataExists && adminDataExists.logo) {
+            // await ctx.replyWithPhoto(adminDataExists.logo, { caption: helpText });
+            let res;
+            if(adminDataExists.logoType === "photo") {
+                res = await ctx.replyWithPhoto(adminDataExists.logo, options);
+            } else if(adminDataExists.logoType === "video") {
+                res = await ctx.replyWithVideo(adminDataExists.logo, options);
+            } else if(adminDataExists.logoType === "animation") {
+                res = await ctx.replyWithAnimation(adminDataExists.logo, options);
+            }
+
+            // console.log("res", res);
+            // if callbackData is setup, enter setupPortal
+            // if(res.callbackQuery && res.callbackQuery.data === "setup") {
+            //     await ctx.conversation.enter('setupPortal');
+            // }
+
+        }
+
+
+    });
+
+    bot.on('callback_query', async (ctx) => {
+        // console.log("callback_query", ctx.callbackQuery.data);
+        if (ctx.callbackQuery && ctx.callbackQuery.data === 'setup') {
+            await ctx.conversation.enter('setupPortal');
+        }
     });
       
     
     commands.private.push({ command: "setup", description: "Setup your portal" });
     bot.command("setup", async (ctx) => {
+        privateChat(ctx);
         console.log("setup");
         await ctx.conversation.enter('setupPortal');
     });    
@@ -830,30 +938,126 @@ module.exports = (bot, commands, db, imports, State) => {
 
     commands.private.push({ command: "help", description: "Get help" });
     bot.command("help", async (ctx) => {
+        privateChat(ctx);
         if(State.isBotBroken) {
             State.isBotBroken = false;
             return;
         }
+        // console.log(ctx.from);
         let helpText = `Welcome to the Portal Bot! Here are the available commands:\n\n`;
         helpText += `/setup - Setup your portal\n`;
         helpText += `/update - Update your portal\n`;
         helpText += `/delete - Delete your portal\n`;
 
-
-        await ctx.reply(helpText);
+        // if adminData has a logo, send the logo
+        const adminDataExists = await adminData.findOne({ _id: 1 });
+        // console.log("adminDataExists", adminDataExists);
+        // console.log("adminDataExists", adminDataExists);
+        if (adminDataExists && adminDataExists.logo) {
+            // await ctx.replyWithPhoto(adminDataExists.logo, { caption: helpText });
+            if(adminDataExists.logoType === "photo") {
+                await ctx.replyWithPhoto(adminDataExists.logo, { caption: helpText });
+            } else if(adminDataExists.logoType === "video") {
+                await ctx.replyWithVideo(adminDataExists.logo, { caption: helpText });
+            } else if(adminDataExists.logoType === "animation") {
+                await ctx.replyWithAnimation(adminDataExists.logo, { caption: helpText });
+            }
+        }
     });
 
-    // Delete all portals
-    commands.private.push({ command: "reset", description: "Delete all portals" });
-    bot.command("reset", async (ctx) => {
+    // update logo
+    // commands.private.push({ command: "logo", description: "Update the logo" });
+    // bot.command("logo", async (ctx) => {
+    //     privateChat(ctx);
+    //     adminOnly(ctx);
+    //     console.log("logo");
+    //     // return;
+    //     if(State.isBotBroken) {
+    //         State.isBotBroken = false;
+    //         return;
+    //     }
+    //     // return;
+
+    //     // Step 0: Request Logo
+    //     await ctx.reply("Please send the updated logo for your portal:");
+    //     let logo = null;
+    //     let logoType = null;
+    //     let logoUrl = null;
+
+        
+    //     const logoRes = await ctx.update.message;
+    //     // console.log("logoRes", logoRes);
+    //     if (logoRes && (logoRes.photo || logoRes.video_note || logoRes.animation)) {
+    //         logo = logoRes;
+    //         logoType = logo.photo ? "photo" : logo.video_note ? "video_note" : logo.animation ? "animation" : null;
+    //         logoUrl = logo.photo ? logo.photo[0].file_id : logo.video_note ? logo.video_note.file_id : logo.animation ? logo.animation.file_id : null;
+    //         // console.log('Logo received:', logo);
+    //         // await ctx.reply("Logo updated!");
+    //         console.log("logoUrl", logoUrl);
+    //         // Step 1: Update Admin Data    
+    //         await updateAdminDataLogo(logoType, logoUrl);
+    //         console.log("Logo updated successfully!");
+    //     } else {
+    //         // Ignore non-logo messages and prompt the user again
+    //         // await ctx.reply("Invalid file. Please send an image, video, or gif.");
+    //     }
+        
+    //     // await ctx.reply("Logo updated successfully!");
+    // });
+
+    // recreate logo command setup but as a conversation
+    async function updateLogo(conversation, ctx) {
         if(State.isBotBroken) {
             State.isBotBroken = false;
             return;
         }
-        const result = await portals.deleteMany({});
-        console.log("All portals deleted.");
-        await ctx.reply(`Deleted ${result.deletedCount} portals from the database.`);
+        // return;
+        // Step 0: Request Logo
+        await ctx.reply("Please send the updated logo for your portal:");
+        let logo = null;
+        let logoType = null;
+        let logoUrl = null;
+
+        const logoRes = await conversation.wait();
+        // console.log("logoRes", logoRes);
+        if (logoRes.message && (logoRes.message.photo || logoRes.message.video || logoRes.message.animation)) {
+            logo = logoRes.message;
+            logoType = logo.photo ? "photo" : logo.video ? "video" : logo.animation ? "animation" : null;
+            logoUrl = logo.photo ? logo.photo[0].file_id : logo.video ? logo.video.file_id : logo.animation ? logo.animation.file_id : null;
+            // console.log('Logo received:', logo);
+            // await ctx.reply("Logo updated!");
+            console.log("logoUrl", logoUrl);
+            // Step 1: Update Admin Data    
+            await updateAdminDataLogo(logoType, logoUrl);
+            console.log("Logo updated successfully!");
+        } else {
+            // Ignore non-logo messages and prompt the user again
+            await ctx.reply("Invalid file. Please send an image, video, or gif.");
+        }
+    }
+
+    bot.use(createConversation(updateLogo));
+
+    // commands.private.push({ command: "logo", description: "Update the logo" });
+    bot.command("logo", async (ctx) => {
+        privateChat(ctx);
+        adminOnly(ctx);
+        console.log("logo");
+        await ctx.conversation.enter('updateLogo');
     });
+
+
+    // // Delete all portals
+    // commands.private.push({ command: "reset", description: "Delete all portals" });
+    // bot.command("reset", async (ctx) => {
+    //     if(State.isBotBroken) {
+    //         State.isBotBroken = false;
+    //         return;
+    //     }
+    //     const result = await portals.deleteMany({});
+    //     console.log("All portals deleted.");
+    //     await ctx.reply(`Deleted ${result.deletedCount} portals from the database.`);
+    // });
   
     // bot.on("message:text", async (ctx) => {
     //   const message = ctx.message.text;
